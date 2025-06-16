@@ -1,6 +1,6 @@
 /**
- * このファイルは /api/analyze.js として配置します。(最終修正版)
- * サーバーレス環境でyt-dlpを安定動作させるため、Node.jsの標準機能で直接実行します。
+ * このファイルは /api/analyze.js として配置します。(最終修正版v2)
+ * サーバーレス環境でのタイムアウト対策を強化したバージョンです。
  */
 import { execFile } from 'child_process';
 import { YtDlp } from 'yt-dlp-wrap';
@@ -15,14 +15,19 @@ const YTDLP_PATH = path.join('/tmp', 'yt-dlp');
  */
 let isYtDlpDownloaded = false;
 async function downloadYtDlp() {
-  if (isYtDlpDownloaded && fs.existsSync(YTDLP_PATH)) {
+  // 既にダウンロード済みであれば何もしない
+  if (isYtDlpDownloaded) return;
+  
+  // ファイルが物理的に存在する場合も、ダウンロード済みとみなす
+  if (fs.existsSync(YTDLP_PATH)) {
+    isYtDlpDownloaded = true;
     return;
   }
   
-  console.log('Downloading yt-dlp...');
+  console.log('Downloading yt-dlp for the first time...');
   try {
     await YtDlp.downloadFromGithub(YTDLP_PATH);
-    fs.chmodSync(YTDLP_PATH, '755');
+    fs.chmodSync(YTDLP_PATH, '755'); // 実行権限を付与
     isYtDlpDownloaded = true;
     console.log('yt-dlp downloaded successfully.');
   } catch (error) {
@@ -38,19 +43,22 @@ async function downloadYtDlp() {
  */
 function getVideoInfo(url) {
   return new Promise((resolve, reject) => {
+    // タイムアウト対策として接続を高速化する引数を追加
     const args = [
       '--dump-json',
       '--no-playlist',
       '--no-warnings',
-      '--format-sort', 'res,vcodec:h264', // H264を優先
+      '--no-check-certificate', // SSL証明書のチェックをスキップして高速化
+      '--format-sort', 'res,vcodec:h264',
       url
     ];
 
-    // タイムアウトを10秒に設定
-    execFile(YTDLP_PATH, args, { timeout: 10000, maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
+    console.log(`Executing yt-dlp with args: ${args.join(' ')}`);
+
+    // VercelのHobbyプランの最大タイムアウトに近い値に設定
+    execFile(YTDLP_PATH, args, { timeout: 14500, maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
       if (error) {
-        // stderrをエラーオブジェクトに添付して、より詳細な情報を提供する
-        error.stderr = stderr;
+        error.stderr = stderr; // エラーオブジェクトに詳細を添付
         return reject(error);
       }
       try {
@@ -69,6 +77,7 @@ export default async function handler(req, res) {
   }
 
   try {
+    // 最初にyt-dlpのダウンロードを試みる
     await downloadYtDlp();
 
     const { url } = JSON.parse(req.body);
@@ -76,7 +85,6 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: '無効なURLです。' });
     }
     
-    console.log(`Analyzing URL: ${url}`);
     const metadata = await getVideoInfo(url);
     
     const result = {
@@ -99,14 +107,12 @@ export default async function handler(req, res) {
         .filter((v, i, a) => a.findIndex(t => (t.quality === v.quality && t.format === v.format)) === i),
     };
     
-    console.log('Analysis successful.');
     return res.status(200).json(result);
 
   } catch (error) {
     console.error('Error in handler:', {
       message: error.message,
       stderr: error.stderr,
-      stack: error.stack,
     });
     const stderr = error.stderr || '';
     if (stderr.includes('Unsupported URL')) {
