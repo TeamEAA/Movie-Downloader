@@ -1,69 +1,61 @@
 /**
- * このファイルは /api/analyze.js として配置します。
- * サーバーレス環境でのタイムアウト対策を強化したバージョンです。
+ * このファイルは /api/analyze.js として配置します。(最終修正版 v3)
+ * サーバーレス環境での起動時エラーを解消するための最終安定版です。
  */
 import { execFile } from 'child_process';
 import { YtDlp } from 'yt-dlp-wrap';
 import path from 'path';
 import fs from 'fs';
 
-// Vercelのサーバーレス環境では、/tmpディレクトリのみ書き込み可能
+// Vercelのサーバーレス環境で唯一書き込み可能な/tmpディレクトリ
 const YTDLP_PATH = path.join('/tmp', 'yt-dlp');
 
 /**
  * サーバー起動時に一度だけyt-dlpバイナリをダウンロードする関数
+ * 멱등성(何度実行しても同じ結果になること)を保証します。
  */
-let isYtDlpDownloaded = false;
-async function downloadYtDlp() {
-  // 既にダウンロード済みであれば何もしない
-  if (isYtDlpDownloaded) return;
-  
-  // ファイルが物理的に存在する場合も、ダウンロード済みとみなす
+const downloadYtDlp = async () => {
+  // すでにファイルが存在すれば、何もしない
   if (fs.existsSync(YTDLP_PATH)) {
-    isYtDlpDownloaded = true;
     return;
   }
   
-  console.log('Downloading yt-dlp for the first time...');
+  console.log('yt-dlp does not exist. Downloading...');
   try {
+    // yt-dlpをダウンロードして/tmpに保存
     await YtDlp.downloadFromGithub(YTDLP_PATH);
-    fs.chmodSync(YTDLP_PATH, '755'); // 実行権限を付与
-    isYtDlpDownloaded = true;
+    // 実行権限を付与
+    fs.chmodSync(YTDLP_PATH, '755');
     console.log('yt-dlp downloaded successfully.');
   } catch (error) {
-    console.error('Failed to download yt-dlp:', error);
-    throw error;
+    console.error('Failed to download or set permissions for yt-dlp:', error);
+    // ここでエラーを投げることで、後続の処理を中断し、ハンドラのエラー処理に移行させる
+    throw new Error('Failed to prepare yt-dlp executable.');
   }
-}
+};
 
 /**
  * yt-dlpを直接実行して動画情報を取得する関数
- * @param {string} url 動画のURL
- * @returns {Promise<object>} 動画情報のJSONオブジェクト
  */
 function getVideoInfo(url) {
   return new Promise((resolve, reject) => {
-    // タイムアウト対策として接続を高速化する引数を追加
     const args = [
       '--dump-json',
       '--no-playlist',
       '--no-warnings',
-      '--no-check-certificate', // SSL証明書のチェックをスキップして高速化
+      '--no-check-certificate',
       '--format-sort', 'res,vcodec:h264',
       url
     ];
 
-    console.log(`Executing yt-dlp with args: ${args.join(' ')}`);
-
-    // VercelのHobbyプランの最大タイムアウトに近い値に設定
-    execFile(YTDLP_PATH, args, { timeout: 14500, maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
+    // Vercel Hobbyプランの最大タイムアウトは15秒なので、少し余裕を持たせる
+    execFile(YTDLP_PATH, args, { timeout: 14000, maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
       if (error) {
-        error.stderr = stderr; // エラーオブジェクトに詳細を添付
+        error.stderr = stderr;
         return reject(error);
       }
       try {
-        const parsed = JSON.parse(stdout);
-        resolve(parsed);
+        resolve(JSON.parse(stdout));
       } catch (parseError) {
         reject(parseError);
       }
@@ -72,19 +64,24 @@ function getVideoInfo(url) {
 }
 
 export default async function handler(req, res) {
+  console.log('API handler invoked.');
+
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method Not Allowed' });
   }
 
   try {
-    // 最初にyt-dlpのダウンロードを試みる
+    // APIが呼ばれるたびに、yt-dlpの存在を確認し、なければダウンロードする
     await downloadYtDlp();
 
-    const { url } = JSON.parse(req.body);
+    const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+    const { url } = body;
+    
     if (!url || !url.startsWith('http')) {
       return res.status(400).json({ error: '無効なURLです。' });
     }
     
+    console.log(`Analyzing URL: ${url}`);
     const metadata = await getVideoInfo(url);
     
     const result = {
@@ -92,16 +89,13 @@ export default async function handler(req, res) {
       thumbnailUrl: metadata.thumbnail,
       formats: metadata.formats
         .filter(f => ((f.vcodec !== 'none' && f.acodec !== 'none') || (f.vcodec === 'none' && f.acodec !== 'none')) && f.url)
-        .map(f => {
-          const isAudioOnly = f.vcodec === 'none';
-          return {
-            quality: isAudioOnly ? `${Math.round(f.abr || 0)}kbps` : `${f.height}p`,
-            format: isAudioOnly ? 'M4A/MP3' : 'MP4',
-            url: f.url,
-            type: isAudioOnly ? 'audio' : 'video',
-            filesize: f.filesize || f.filesize_approx || 0,
-          };
-        })
+        .map(f => ({
+          quality: f.vcodec === 'none' ? `${Math.round(f.abr || 0)}kbps` : `${f.height}p`,
+          format: f.vcodec === 'none' ? 'M4A/MP3' : 'MP4',
+          url: f.url,
+          type: f.vcodec === 'none' ? 'audio' : 'video',
+          filesize: f.filesize || f.filesize_approx || 0,
+        }))
         .filter(f => f.filesize > 0)
         .reverse()
         .filter((v, i, a) => a.findIndex(t => (t.quality === v.quality && t.format === v.format)) === i),
@@ -110,10 +104,7 @@ export default async function handler(req, res) {
     return res.status(200).json(result);
 
   } catch (error) {
-    console.error('Error in handler:', {
-      message: error.message,
-      stderr: error.stderr,
-    });
+    console.error('Critical error in handler:', { message: error.message, stderr: error.stderr });
     const stderr = error.stderr || '';
     if (stderr.includes('Unsupported URL')) {
       return res.status(400).json({ error: 'このURLには対応していません。' });
