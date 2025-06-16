@@ -1,6 +1,7 @@
 {
   "name": "online-downloader",
   "version": "1.0.0",
+  "type": "module",
   "scripts": {
     "build": "tailwindcss -i ./input.css -o ./public/style.css"
   },
