@@ -1,6 +1,6 @@
 /**
- * このファイルは /api/analyze.js として配置します。(最終修正版 v3)
- * サーバーレス環境での起動時エラーを解消するための最終安定版です。
+ * このファイルは /api/analyze.js として配置します。(最終安定版 v4)
+ * Vercelサーバーレス環境での起動時の問題を解決するための、より堅牢なバージョンです。
  */
 import { execFile } from 'child_process';
 import { YtDlp } from 'yt-dlp-wrap';
@@ -10,28 +10,40 @@ import fs from 'fs';
 // Vercelのサーバーレス環境で唯一書き込み可能な/tmpディレクトリ
 const YTDLP_PATH = path.join('/tmp', 'yt-dlp');
 
+// yt-dlpのダウンロード処理をキャッシュするための変数
+let downloadPromise = null;
+
 /**
- * サーバー起動時に一度だけyt-dlpバイナリをダウンロードする関数
- * 멱등성(何度実行しても同じ結果になること)を保証します。
+ * yt-dlpのバイナリが存在することを保証する関数。
+ * 存在しない場合はダウンロードし、複数回呼ばれてもダウンロードは一度しか実行されないようにします。
  */
-const downloadYtDlp = async () => {
-  // すでにファイルが存在すれば、何もしない
+const ensureYtDlpIsReady = () => {
+  // 既にファイルが存在すれば、何もする必要はない
   if (fs.existsSync(YTDLP_PATH)) {
-    return;
+    return Promise.resolve();
   }
-  
-  console.log('yt-dlp does not exist. Downloading...');
-  try {
-    // yt-dlpをダウンロードして/tmpに保存
-    await YtDlp.downloadFromGithub(YTDLP_PATH);
-    // 実行権限を付与
-    fs.chmodSync(YTDLP_PATH, '755');
-    console.log('yt-dlp downloaded successfully.');
-  } catch (error) {
-    console.error('Failed to download or set permissions for yt-dlp:', error);
-    // ここでエラーを投げることで、後続の処理を中断し、ハンドラのエラー処理に移行させる
-    throw new Error('Failed to prepare yt-dlp executable.');
+
+  // すでにダウンロード処理が進行中であれば、その処理が終わるのを待つ
+  if (downloadPromise) {
+    return downloadPromise;
   }
+
+  // ダウンロード処理を開始し、そのPromiseをキャッシュする
+  downloadPromise = (async () => {
+    console.log('yt-dlp executable not found. Starting download...');
+    try {
+      await YtDlp.downloadFromGithub(YTDLP_PATH);
+      console.log('Download complete. Setting permissions...');
+      fs.chmodSync(YTDLP_PATH, '755');
+      console.log('yt-dlp is ready.');
+    } catch (error) {
+      console.error('Failed to download or set permissions for yt-dlp:', error);
+      downloadPromise = null; // エラーが発生した場合は、次回の呼び出しで再試行できるようにPromiseをリセット
+      throw new Error('Failed to initialize the analysis engine.');
+    }
+  })();
+
+  return downloadPromise;
 };
 
 /**
@@ -40,15 +52,10 @@ const downloadYtDlp = async () => {
 function getVideoInfo(url) {
   return new Promise((resolve, reject) => {
     const args = [
-      '--dump-json',
-      '--no-playlist',
-      '--no-warnings',
-      '--no-check-certificate',
+      '--dump-json', '--no-playlist', '--no-warnings', '--no-check-certificate',
       '--format-sort', 'res,vcodec:h264',
       url
     ];
-
-    // Vercel Hobbyプランの最大タイムアウトは15秒なので、少し余裕を持たせる
     execFile(YTDLP_PATH, args, { timeout: 14000, maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
       if (error) {
         error.stderr = stderr;
@@ -63,17 +70,17 @@ function getVideoInfo(url) {
   });
 }
 
-export default async function handler(req, res) {
-  console.log('API handler invoked.');
 
+export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method Not Allowed' });
   }
 
   try {
-    // APIが呼ばれるたびに、yt-dlpの存在を確認し、なければダウンロードする
-    await downloadYtDlp();
+    // ステップ1: 解析エンジンの準備
+    await ensureYtDlpIsReady();
 
+    // ステップ2: リクエストボディの解析
     const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
     const { url } = body;
     
@@ -81,9 +88,11 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: '無効なURLです。' });
     }
     
-    console.log(`Analyzing URL: ${url}`);
+    // ステップ3: 動画情報の取得
+    console.log(`Ready to analyze. URL: ${url}`);
     const metadata = await getVideoInfo(url);
     
+    // ステップ4: 結果の整形
     const result = {
       title: metadata.title,
       thumbnailUrl: metadata.thumbnail,
@@ -106,6 +115,10 @@ export default async function handler(req, res) {
   } catch (error) {
     console.error('Critical error in handler:', { message: error.message, stderr: error.stderr });
     const stderr = error.stderr || '';
+    // エラーの種類に応じて、より分かりやすいメッセージを返す
+    if (error.message === 'Failed to initialize the analysis engine.') {
+        return res.status(500).json({ error: 'サーバーの初回起動に失敗しました。数秒後にもう一度お試しください。' });
+    }
     if (stderr.includes('Unsupported URL')) {
       return res.status(400).json({ error: 'このURLには対応していません。' });
     }
