@@ -1,12 +1,13 @@
 {
   "name": "online-downloader",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build": "tailwindcss -i ./input.css -o ./public/style.css"
   },
   "dependencies": {
     "yt-dlp-wrap": "^2.3.12"
+  },
+  "devDependencies": {
+    "tailwindcss": "^3.4.1"
   }
 }
