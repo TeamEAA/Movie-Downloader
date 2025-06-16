@@ -1,6 +1,6 @@
 /**
- * このファイルは /api/analyze.js として配置します。(最終診断・安定版 v6)
- * 詳細なエラーロギング機能を追加し、未知のエラーの原因を特定できるようにしたバージョンです。
+ * このファイルは /api/analyze.js として配置します。(YouTube限定版)
+ * トラブルシューティングのため、機能をYouTube動画のみに限定したバージョンです。
  */
 import { execFile } from 'child_process';
 import { YtDlp } from 'yt-dlp-wrap';
@@ -68,9 +68,15 @@ export default async function handler(req, res) {
     const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
     const { url } = body;
     
-    if (!url || !url.startsWith('http')) {
-      return res.status(400).json({ error: '無効なURLです。' });
+    // --- YouTube URL限定チェック ---
+    if (!url) {
+      return res.status(400).json({ error: 'URLが入力されていません。' });
     }
+    const isYoutubeUrl = /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.?be)\/.+$/.test(url);
+    if (!isYoutubeUrl) {
+      return res.status(400).json({ error: '現在、YouTubeのURLのみに対応しています。' });
+    }
+    // --- チェックここまで ---
     
     const metadata = await getVideoInfo(url);
     
