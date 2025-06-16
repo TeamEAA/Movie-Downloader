@@ -1,5 +1,5 @@
 /**
- * このファイルは /api/analyze.js として配置します。(最終修正版v2)
+ * このファイルは /api/analyze.js として配置します。
  * サーバーレス環境でのタイムアウト対策を強化したバージョンです。
  */
 import { execFile } from 'child_process';
