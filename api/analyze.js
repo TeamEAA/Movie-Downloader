@@ -1,6 +1,6 @@
 /**
- * このファイルは /api/analyze.js として配置します。(最終安定版 v5)
- * Vercelサーバーレス環境での起動時の問題を解決するため、ログと安定性を強化した最終バージョンです。
+ * このファイルは /api/analyze.js として配置します。(最終診断・安定版 v6)
+ * 詳細なエラーロギング機能を追加し、未知のエラーの原因を特定できるようにしたバージョンです。
  */
 import { execFile } from 'child_process';
 import { YtDlp } from 'yt-dlp-wrap';
@@ -10,14 +10,13 @@ import fs from 'fs';
 // Vercelのサーバーレス環境で唯一書き込み可能な/tmpディレクトリ
 const YTDLP_PATH = path.join('/tmp', 'yt-dlp');
 
-// yt-dlpのダウンロード処理を一度だけ実行するためのシンプルなフラグ
+// yt-dlpの準備が完了したかを保持するフラグ
 let isYtDlpReady = false;
 
 /**
  * yt-dlpのバイナリが存在することを保証する関数。
  */
 async function ensureYtDlpIsReady() {
-  // 既に準備完了フラグが立っているか、ファイルが存在すれば何もしない
   if (isYtDlpReady || fs.existsSync(YTDLP_PATH)) {
     isYtDlpReady = true;
     return;
@@ -25,15 +24,12 @@ async function ensureYtDlpIsReady() {
   
   console.log('Analysis engine not ready. Initializing...');
   try {
-    // yt-dlpをダウンロードして/tmpに保存
     await YtDlp.downloadFromGithub(YTDLP_PATH);
-    // 実行権限を付与
     fs.chmodSync(YTDLP_PATH, '755');
-    isYtDlpReady = true; // 準備完了フラグを立てる
+    isYtDlpReady = true;
     console.log('Analysis engine is now ready.');
   } catch (error) {
     console.error('CRITICAL: Failed to initialize analysis engine:', error);
-    // 初期化に失敗したことを示すカスタムエラーを投げる
     throw new Error('ENGINE_INITIALIZATION_FAILED');
   }
 }
@@ -43,13 +39,16 @@ async function ensureYtDlpIsReady() {
  */
 function getVideoInfo(url) {
   return new Promise((resolve, reject) => {
+    // 互換性を向上させるための引数を追加
     const args = [
       '--dump-json', '--no-playlist', '--no-warnings', '--no-check-certificate',
       '--format-sort', 'res,vcodec:h264',
+      '--no-mtime', // ファイルの最終更新日時の設定を無効化
       url
     ];
     execFile(YTDLP_PATH, args, { timeout: 14000, maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
       if (error) {
+        // エラーオブジェクトにstderr（標準エラー出力）を追加して、より多くの情報を含める
         error.stderr = stderr;
         return reject(error);
       }
@@ -63,15 +62,9 @@ function getVideoInfo(url) {
 }
 
 export default async function handler(req, res) {
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method Not Allowed' });
-  }
-
   try {
-    // ステップ1: 解析エンジンの準備
     await ensureYtDlpIsReady();
 
-    // ステップ2: リクエストボディの解析
     const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
     const { url } = body;
     
@@ -79,10 +72,8 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: '無効なURLです。' });
     }
     
-    // ステップ3: 動画情報の取得
     const metadata = await getVideoInfo(url);
     
-    // ステップ4: 結果の整形
     const result = {
       title: metadata.title,
       thumbnailUrl: metadata.thumbnail,
@@ -103,17 +94,28 @@ export default async function handler(req, res) {
     return res.status(200).json(result);
 
   } catch (error) {
-    // エラーの種類に応じて、より分かりやすいメッセージを返す
-    if (error.message === 'ENGINE_INITIALIZATION_FAILED') {
+    // --- エラーハンドリングを強化 ---
+    const stderr = error.stderr || '';
+    const errorMessage = error.message || '';
+
+    // Vercelのログに詳細なエラー情報を記録する
+    console.error('AN ERROR OCCURRED:', {
+        message: errorMessage,
+        stderr: stderr,
+        stack: error.stack,
+    });
+    
+    if (errorMessage.includes('ENGINE_INITIALIZATION_FAILED')) {
       return res.status(500).json({ error: 'サーバーの初回起動に失敗しました。数秒後にもう一度お試しください。' });
     }
-    const stderr = error.stderr || '';
     if (stderr.includes('Unsupported URL')) {
       return res.status(400).json({ error: 'このURLには対応していません。' });
     }
     if (stderr.includes('Private video') || stderr.includes('Video unavailable')) {
       return res.status(403).json({ error: 'この動画は非公開か、利用できません。' });
     }
-    return res.status(500).json({ error: '動画情報の解析に失敗しました。タイムアウトしたか、サーバーで問題が発生した可能性があります。' });
+
+    // これまでキャッチできなかった未知のエラーに対して、より具体的なメッセージを返す
+    return res.status(500).json({ error: '解析中に予期せぬ問題が発生しました。サイトが対応していない可能性があります。' });
   }
 }
