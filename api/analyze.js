@@ -1,6 +1,6 @@
 /**
- * このファイルは /api/analyze.js として配置します。(最終安定版 v4)
- * Vercelサーバーレス環境での起動時の問題を解決するための、より堅牢なバージョンです。
+ * このファイルは /api/analyze.js として配置します。(最終安定版 v5)
+ * Vercelサーバーレス環境での起動時の問題を解決するため、ログと安定性を強化した最終バージョンです。
  */
 import { execFile } from 'child_process';
 import { YtDlp } from 'yt-dlp-wrap';
@@ -10,41 +10,33 @@ import fs from 'fs';
 // Vercelのサーバーレス環境で唯一書き込み可能な/tmpディレクトリ
 const YTDLP_PATH = path.join('/tmp', 'yt-dlp');
 
-// yt-dlpのダウンロード処理をキャッシュするための変数
-let downloadPromise = null;
+// yt-dlpのダウンロード処理を一度だけ実行するためのシンプルなフラグ
+let isYtDlpReady = false;
 
 /**
  * yt-dlpのバイナリが存在することを保証する関数。
- * 存在しない場合はダウンロードし、複数回呼ばれてもダウンロードは一度しか実行されないようにします。
  */
-const ensureYtDlpIsReady = () => {
-  // 既にファイルが存在すれば、何もする必要はない
-  if (fs.existsSync(YTDLP_PATH)) {
-    return Promise.resolve();
+async function ensureYtDlpIsReady() {
+  // 既に準備完了フラグが立っているか、ファイルが存在すれば何もしない
+  if (isYtDlpReady || fs.existsSync(YTDLP_PATH)) {
+    isYtDlpReady = true;
+    return;
   }
-
-  // すでにダウンロード処理が進行中であれば、その処理が終わるのを待つ
-  if (downloadPromise) {
-    return downloadPromise;
+  
+  console.log('Analysis engine not ready. Initializing...');
+  try {
+    // yt-dlpをダウンロードして/tmpに保存
+    await YtDlp.downloadFromGithub(YTDLP_PATH);
+    // 実行権限を付与
+    fs.chmodSync(YTDLP_PATH, '755');
+    isYtDlpReady = true; // 準備完了フラグを立てる
+    console.log('Analysis engine is now ready.');
+  } catch (error) {
+    console.error('CRITICAL: Failed to initialize analysis engine:', error);
+    // 初期化に失敗したことを示すカスタムエラーを投げる
+    throw new Error('ENGINE_INITIALIZATION_FAILED');
   }
-
-  // ダウンロード処理を開始し、そのPromiseをキャッシュする
-  downloadPromise = (async () => {
-    console.log('yt-dlp executable not found. Starting download...');
-    try {
-      await YtDlp.downloadFromGithub(YTDLP_PATH);
-      console.log('Download complete. Setting permissions...');
-      fs.chmodSync(YTDLP_PATH, '755');
-      console.log('yt-dlp is ready.');
-    } catch (error) {
-      console.error('Failed to download or set permissions for yt-dlp:', error);
-      downloadPromise = null; // エラーが発生した場合は、次回の呼び出しで再試行できるようにPromiseをリセット
-      throw new Error('Failed to initialize the analysis engine.');
-    }
-  })();
-
-  return downloadPromise;
-};
+}
 
 /**
  * yt-dlpを直接実行して動画情報を取得する関数
@@ -70,7 +62,6 @@ function getVideoInfo(url) {
   });
 }
 
-
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method Not Allowed' });
@@ -89,7 +80,6 @@ export default async function handler(req, res) {
     }
     
     // ステップ3: 動画情報の取得
-    console.log(`Ready to analyze. URL: ${url}`);
     const metadata = await getVideoInfo(url);
     
     // ステップ4: 結果の整形
@@ -113,12 +103,11 @@ export default async function handler(req, res) {
     return res.status(200).json(result);
 
   } catch (error) {
-    console.error('Critical error in handler:', { message: error.message, stderr: error.stderr });
-    const stderr = error.stderr || '';
     // エラーの種類に応じて、より分かりやすいメッセージを返す
-    if (error.message === 'Failed to initialize the analysis engine.') {
-        return res.status(500).json({ error: 'サーバーの初回起動に失敗しました。数秒後にもう一度お試しください。' });
+    if (error.message === 'ENGINE_INITIALIZATION_FAILED') {
+      return res.status(500).json({ error: 'サーバーの初回起動に失敗しました。数秒後にもう一度お試しください。' });
     }
+    const stderr = error.stderr || '';
     if (stderr.includes('Unsupported URL')) {
       return res.status(400).json({ error: 'このURLには対応していません。' });
     }
