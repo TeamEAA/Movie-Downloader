@@ -1,5 +1,5 @@
 {
-  "name": "online-downloader",
+  "name": "movie-downloader",
   "version": "1.0.0",
   "type": "module",
   "scripts": {
