@@ -7,8 +7,6 @@
     <link href="/style.css" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
     <style>
-        /* CSS変数は `public/style.css` にTailwindが生成するため、ここでは不要。
-           ただし、カスタムアニメーションなどはここに残すか、input.cssに移動します。 */
         body { font-family: 'Noto Sans JP', sans-serif; }
         .loader { animation: spin 1s linear infinite; }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
@@ -82,7 +80,6 @@
     </footer>
 
     <script>
-        // JavaScript部分は変更なし
         document.addEventListener('DOMContentLoaded', () => {
             const initialView = document.getElementById('initial-view');
             const analyzeButton = document.getElementById('analyze-button');
